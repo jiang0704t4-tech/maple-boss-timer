@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="zh-TW">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover">
+  <title>🍁 楓之谷 Boss 重生計時器</title>
+  <!-- Tailwind CSS CDN -->
+  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- MQTT.js CDN for WebSocket real-time broadcast without backend server -->
+  <script src="https://unpkg.com/mqtt/dist/mqtt.min.js"></script>
+
+  <style>
+    :root {
+      --bg-color: #070b13;
+      --card-bg: #0f172a;
+      --border-color: #1e293b;
+      --accent-orange: #f97316;
+      --glow-blue: rgba(59, 130, 246, 0.45);
+      --glow-red: rgba(239, 68, 68, 0.7);
+    }
+
+    * {
+      box-sizing: border-box;
+      -webkit-tap-highlight-color: transparent;
+      user-select: none;
+      -webkit-user-select: none;
+    }
+
+    /* 強制單屏無滾動條 */
+    html, body {
+      height: 100%;
+      height: 100dvh;
+      width: 100vw;
+      margin: 0;
+      padding: 0;
+      overflow: hidden;
+      background-color: var(--bg-color);
+      color: #f1f5f9;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "PingFang TC", "Noto Sans TC", sans-serif;
+    }
+
+    /* 6 欄 x 10 列 完美平鋪網格 */
+    .grid-board {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      grid-template-rows: repeat(10, 1fr);
+      gap: 3px;
+      flex: 1 1 0%;
+      min-height: 0;
+      width: 100%;
+    }
+
+    /* 頻道按鈕骨架 */
+    .ch-btn {
+      position: relative;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      padding: 1px;
+      border-radius: 6px;
+      border: 1px solid #1e293b;
+      background: linear-gradient(180deg, #162032 0%, #0d1424 100%);
+      cursor: pointer;
+      overflow: hidden;
+      box-shadow: 0 1px 2px rgba(0, 0, 0, 0.4);
+      transition: transform 0.06s ease, background 0.15s ease, border-color 0.15s ease;
+    }
+
+    .ch-btn:active {
+      transform: scale(0.92);
+    }
+
+    /* CH 編號特大加粗字體 */
+    .ch-title {
+      font-size: clamp(12px, 3.4vw, 15px);
+      font-weight: 900;
+      line-height: 1.1;
+      letter-spacing: -0.3px;
+    }
+
+    /* 倒數狀態字體 */
+    .ch-time {
+      font-size: clamp(8.5px, 2.3vw, 11px);
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+      line-height: 1.1;
+      margin-top: 1px;
+      font-weight: 600;
+      letter-spacing: -0.2px;
+    }
+
+    /* 狀態 1: 就緒 (Ready) */
+    .ch-btn.ready {
+      background: linear-gradient(180deg, #162236 0%, #0c1322 100%);
+      border-color: #26354a;
+    }
+    .ch-btn.ready .ch-title {
+      color: #cbd5e1;
+    }
+    .ch-btn.ready .ch-time {
+      color: #64748b;
+    }
+
+    /* 狀態 2: 倒數中 (Counting) */
+    .ch-btn.counting {
+      background: linear-gradient(180deg, #1d4ed8 0%, #172554 100%);
+      border-color: #60a5fa;
+      box-shadow: inset 0 0 6px rgba(96, 165, 250, 0.4), 0 0 4px rgba(37, 99, 235, 0.3);
+    }
+    .ch-btn.counting .ch-title {
+      color: #ffffff;
+      text-shadow: 0 0 4px rgba(147, 197, 253, 0.8);
+    }
+    .ch-btn.counting .ch-time {
+      color: #bae6fd;
+      font-weight: 800;
+    }
+
+    /* 狀態 3: 已重生 (Spawned - 紅色呼吸警示) */
+    .ch-btn.spawned {
+      background: linear-gradient(180deg, #ef4444 0%, #991b1b 100%);
+      border-color: #fca5a5;
+      animation: alertPulse 1.05s ease-in-out infinite;
+    }
+    .ch-btn.spawned .ch-title {
+      color: #ffffff;
+      font-weight: 950;
+      text-shadow: 0 0 6px rgba(254, 240, 138, 0.85);
+    }
+    .ch-btn.spawned .ch-time {
+      color: #fef08a;
+      font-weight: 900;
+    }
+
+    @keyframes alertPulse {
+      0%, 100% {
+        box-shadow: 0 0 8px var(--glow-red), inset 0 0 6px rgba(254, 202, 202, 0.4);
+        filter: brightness(1.02);
+      }
+      50% {
+        box-shadow: 0 0 2px rgba(239, 68, 68, 0.3);
+        filter: brightness(1.35);
+      }
+    }
+
+    /* 彈出視窗動畫 */
+    .modal-box {
+      display: none;
+    }
+    .modal-box.show {
+      display: flex;
+    }
+  </style>
+</head>
+<body class="flex flex-col h-full w-full bg-[#070b13]">
+
+  <header class="flex-none px-2 py-1.5 bg-gradient-to-b from-[#131d2e] to-[#0a101b] border-b border-[#1f2d42] shadow-md z-20">
+    <div class="flex items-center justify-between gap-1 w-full max-w-screen-md mx-auto">
+      
+      <!-- 左側：房間同步按鈕 + 標題 -->
+      <div class="flex items-center gap-1.5 min-w-0">
+        <button 
+          id="roomBadgeBtn" 
+          onclick="openRoomModal()" 
+          class="flex items-center gap-1 bg-[#1e293b] hover:bg-[#334155] border border-cyan-500/50 px-1.5 py-0.5 rounded text-[11px] font-bold text-cyan-300 active:scale-95 transition shadow-sm"
+          title="多人連線房間設定"
+        >
+          <span id="roomStatusIcon">🔗</span>
+          <span id="roomBadgeText" class="text-[10px] tracking-tight">單機</span>
+        </button>
+
+        <div class="flex items-center gap-1 min-w-0">
+          <span class="text-sm select-none leading-none">🍁</span>
+          <h1 class="text-[12px] font-black tracking-tight text-white whitespace-nowrap overflow-hidden text-ellipsis">
+            楓之谷 Boss 重生計時器
+          </h1>
+        </div>
+      </div>
+
+      <!-- 中間：倒數時間設定 -->
+      <div class="flex items-center gap-1 text-[11px] text-gray-200 flex-shrink-0">
+        <div class="flex items-center bg-[#070c14] rounded border border-[#334155] px-1 py-0.5 focus-within:border-amber-400">
+          <input 
+            id="minutesInput" 
+            type="number" 
+            min="0" 
+            max="999" 
+            value="45" 
+            class="w-6 bg-transparent text-center font-black text-amber-300 outline-none p-0 text-[11px]"
+          />
+          <span class="text-[9.5px] text-gray-400">分</span>
+        </div>
+        <div class="flex items-center bg-[#070c14] rounded border border-[#334155] px-1 py-0.5 focus-within:border-amber-400">
+          <input 
+            id="secondsInput" 
+            type="number" 
+            min="0" 
+            max="59" 
+            value="0" 
+            class="w-5 bg-transparent text-center font-black text-amber-300 outline-none p-0 text-[11px]"
+          />
+          <span class="text-[9.5px] text-gray-400">秒</span>
+        </div>
+      </div>
+
+      <!-- 右側：功能按鈕 -->
+      <div class="flex items-center gap-1 flex-shrink-0">
+        <button 
+          onclick="confirmResetAll()" 
+          class="bg-gradient-to-r from-red-950 to-rose-900 hover:from-red-800 border border-red-500/50 text-red-100 px-1.5 py-0.5 rounded text-[11px] font-bold active:scale-95 shadow-sm transition"
+        >
+          全置
+        </button>
+        <button 
+          onclick="toggleHelp()" 
+          class="bg-[#1e293b] hover:bg-[#334155] active:scale-95 text-slate-300 border border-slate-600 px-1.5 py-0.5 rounded text-[11px] font-bold transition"
+        >
+          ?
+        </button>
+      </div>
+
+    </div>
+  </header>
+
+  <main class="flex-1 w-full p-1 min-h-0 overflow-hidden flex flex-col">
+    <div id="channelGrid" class="grid-board">
+      <!-- 60 個頻道動態建立於此 -->
+    </div>
+  </main>
+
+  <!-- 房間同步設定彈窗 -->
+  <div id="roomModal" class="modal-box fixed inset-0 bg-black/80 z-50 items-center justify-center p-3 backdrop-blur-sm">
+    <div class="bg-[#131d2e] border border-blue-500/40 w-full max-w-sm rounded-xl p-4 shadow-2xl">
+      <div class="flex justify-between items-center mb-2.5 border-b border-gray-700/60 pb-2">
+        <h3 class="text-sm font-bold text-white flex items-center gap-1.5">
+          <span>👥 多人即時同步房間</span>
+        </h3>
+        <button onclick="closeRoomModal()" class="text-gray-400 hover:text-white text-base px-1">✕</button>
+      </div>
+
+      <div class="bg-[#0b121e] p-2.5 rounded-lg border border-gray-800 text-[11px] text-gray-300 mb-3 space-y-1">
+        <p>💡 <span class="text-amber-300 font-bold">免伺服器、全自動連線！</span></p>
+        <p>只要你和隊友輸入同一個 <b class="text-cyan-300">6 位數房間碼</b>，在有網路的情況下，任何一人點擊按鈕，所有人螢幕**秒級同步倒數**！</p>
+      </div>
+
+      <div class="mb-3">
+        <label class="block text-[11px] text-sky-300 mb-1 font-semibold">輸入 6 位數房間碼：</label>
+        <div class="flex gap-2">
+          <input 
+            id="roomCodeInput" 
+            type="text" 
+            maxlength="6" 
+            placeholder="例如: 884920" 
+            class="flex-1 bg-[#070b13] border border-cyan-500/50 rounded-lg px-3 py-2 text-center text-lg tracking-widest font-mono font-black text-amber-300 uppercase outline-none focus:border-amber-400"
+          />
+          <button 
+            onclick="generateRandomRoom()" 
+            class="bg-slate-700 hover:bg-slate-600 text-[11px] font-bold text-slate-200 px-3 py-2 rounded-lg transition active:scale-95"
+          >
+            隨機
+          </button>
+        </div>
+      </div>
+
+      <!-- 操作按鈕 -->
+      <div class="grid grid-cols-2 gap-2 mb-3">
+        <button 
+          onclick="joinRoomAction()" 
+          class="bg-blue-600 hover:bg-blue-500 text-white font-bold py-2 rounded-lg text-xs shadow-md transition active:scale-95"
+        >
+          連線 / 同步房間
+        </button>
+        <button 
+          onclick="copyInviteLink()" 
+          id="copyLinkBtn" 
+          class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2 rounded-lg text-xs shadow-md transition active:scale-95 flex items-center justify-center gap-1"
+        >
+          📋 複製邀請連結
+        </button>
+      </div>
+
+      <!-- 連線狀態欄 -->
+      <div class="pt-2 border-t border-gray-800 flex justify-between items-center text-[11px]">
+        <div class="flex items-center gap-1">
+          <span class="text-gray-400" id="currentRoomText">狀態：單機模式</span>
+          <span id="mqttStatusDot" class="inline-block w-2 h-2 rounded-full bg-gray-500"></span>
+        </div>
+        <button 
+          onclick="leaveRoomAction()" 
+          class="text-rose-400 hover:text-rose-300 underline font-semibold"
+        >
+          切換回單機
+        </button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 確認提示對話框 -->
+  <div id="generalDialog" class="modal-box fixed inset-0 bg-black/80 z-50 items-center justify-center p-4 backdrop-blur-sm">
+    <div class="bg-[#141d2f] border border-[#334155] w-full max-w-xs rounded-xl p-4 shadow-2xl text-center">
+      <h3 id="dialogTitle" class="text-sm font-bold text-white mb-2">確認操作</h3>
+      <p id="dialogMessage" class="text-xs text-gray-300 mb-4 whitespace-pre-line leading-relaxed"></p>
+      <div class="flex justify-center gap-2">
+        <button id="dialogCancelBtn" class="flex-1 py-1.5 bg-[#334155] hover:bg-slate-600 rounded-lg text-xs font-semibold text-gray-200 transition">取消</button>
+        <button id="dialogConfirmBtn" class="flex-1 py-1.5 bg-rose-600 hover:bg-rose-500 rounded-lg text-xs font-bold text-white shadow-md transition">確定</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const TOTAL_CHANNELS = 60;
+    const STORAGE_KEY = 'maple_timer_targets_v5';
+    const SETTINGS_KEY = 'maple_timer_settings_v5';
+    const ROOM_KEY = 'maple_timer_room_v5';
+
+    // MQTT 設定：使用全球公開且完全免費的 HiveMQ 公開 Broker (WSS 端口 8884)
+    const MQTT_BROKER_URL = 'wss://broker.hivemq.com:8884/mqtt';
+    const MQTT_TOPIC_PREFIX = 'maple_boss_tracker_2026/';
+
+    let targets = Array(TOTAL_CHANNELS + 1).fill(0);
+    let currentRoom = localStorage.getItem(ROOM_KEY) || '';
+    let mqttClient = null;
+    let clientId = 'client_' + Math.random().toString(16).substring(2, 10);
+
+    // DOM 元素快取
+    const gridEl = document.getElementById('channelGrid');
+    const minInput = document.getElementById('minutesInput');
+    const secInput = document.getElementById('secondsInput');
+    const roomModal = document.getElementById('roomModal');
+    const roomCodeInput = document.getElementById('roomCodeInput');
+    const roomBadgeText = document.getElementById('roomBadgeText');
+    const roomStatusIcon = document.getElementById('roomStatusIcon');
+    const currentRoomText = document.getElementById('currentRoomText');
+    const mqttStatusDot = document.getElementById('mqttStatusDot');
+
+    // 載入倒數設定
+    try {
+      const savedSettings = JSON.parse(localStorage.getItem(SETTINGS_KEY));
+      if (savedSettings) {
+        if (typeof savedSettings.m === 'number') minInput.value = savedSettings.m;
+        if (typeof savedSettings.s === 'number') secInput.value = savedSettings.s;
+      }
+    } catch (e) {}
+
+    // 載入本地計時快取
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length === TOTAL_CHANNELS + 1) {
+          targets = parsed;
+        }
+      }
+    } catch (e) {}
+
+    function saveSettings() {
+      const m = parseInt(minInput.value) || 0;
+      const s = parseInt(secInput.value) || 0;
+      localStorage.setItem(SETTINGS_KEY, JSON.stringify({ m, s }));
+      if (currentRoom) {
+        broadcastMqtt({ type: 'settings', m, s });
+      }
+    }
+    minInput.addEventListener('change', saveSettings);
+    secInput.addEventListener('change', saveSettings);
+
+    function getTargetDurationMs() {
+      const m = Math.max(0, parseInt(minInput.value) || 0);
+      const s = Math.max(0, parseInt(secInput.value) || 0);
+      const totalSec = (m * 60) + s;
+      return (totalSec > 0 ? totalSec : 1) * 1000;
+    }
+
+    function saveLocalTargets() {
+      try {
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(targets));
+      } catch (e) {}
+    }
+
+    const channelElements = [];
+    for (let ch = 1; ch <= TOTAL_CHANNELS; ch++) {
+      const btn = document.createElement('div');
+      btn.className = 'ch-btn ready';
+      btn.id = `btn-ch-${ch}`;
+
+      const titleSpan = document.createElement('span');
+      titleSpan.className = 'ch-title';
+      titleSpan.textContent = `CH ${ch}`;
+
+      const timeSpan = document.createElement('span');
+      timeSpan.className = 'ch-time';
+      timeSpan.id = `time-ch-${ch}`;
+      timeSpan.textContent = 'Ready';
+
+      btn.appendChild(titleSpan);
+      btn.appendChild(timeSpan);
+
+      // 長按 0.7 秒重置
+      let timer = null;
+      let didLongPress = false;
+
+      const triggerLongPress = () => {
+        didLongPress = true;
+        targets[ch] = 0;
+        onChannelChanged(ch, 0);
+        if (navigator.vibrate) navigator.vibrate(50);
+      };
+
+      const startTouch = () => {
+        didLongPress = false;
+        timer = setTimeout(triggerLongPress, 700);
+      };
+
+      const endTouch = () => {
+        if (timer) clearTimeout(timer);
+        if (!didLongPress) {
+          handleChannelClick(ch);
+        }
+      };
+
+      const cancelTouch = () => {
+        if (timer) clearTimeout(timer);
+      };
+
+      btn.addEventListener('touchstart', startTouch, { passive: true });
+      btn.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        endTouch();
+      });
+      btn.addEventListener('touchcancel', cancelTouch);
+
+      btn.addEventListener('mousedown', startTouch);
+      btn.addEventListener('mouseup', endTouch);
+      btn.addEventListener('mouseleave', cancelTouch);
+
+      gridEl.appendChild(btn);
+      channelElements[ch] = { btn, timeSpan };
+    }
+
+    function handleChannelClick(ch) {
+      const now = Date.now();
+      const currentVal = targets[ch];
+      let newTarget = 0;
+
+      if (currentVal === 0) {
+        newTarget = now + getTargetDurationMs();
+      } else if (now >= currentVal) {
+        newTarget = 0; // 重生確認，回歸就緒
+      } else {
+        newTarget = now + getTargetDurationMs(); // 重新計時
+      }
+
+      targets[ch] = newTarget;
+      onChannelChanged(ch, newTarget);
+      if (navigator.vibrate) navigator.vibrate(25);
+    }
+
+    function onChannelChanged(ch, targetTime) {
+      saveLocalTargets();
+      updateChannelUI(ch);
+
+      // 若在房間中，即時透過 MQTT 廣播給所有隊友
+      if (currentRoom) {
+        broadcastMqtt({
+          type: 'channel_update',
+          ch: ch,
+          target: targetTime,
+          from: clientId
+        });
+      }
+    }
+
+    function formatClock(totalSeconds) {
+      if (totalSeconds < 0) return '00:00';
+      const m = Math.floor(totalSeconds / 60);
+      const s = totalSeconds % 60;
+      if (m >= 100) return `${m}分`;
+      return `${String(m).padStart(2, '0')}:${String(s).padStart(2, '0')}`;
+    }
+
+    function updateChannelUI(ch) {
+      const el = channelElements[ch];
+      if (!el) return;
+
+      const target = targets[ch];
+      const now = Date.now();
+
+      if (target === 0) {
+        el.btn.className = 'ch-btn ready';
+        el.timeSpan.textContent = 'Ready';
+      } else if (now >= target) {
+        el.btn.className = 'ch-btn spawned';
+        el.timeSpan.textContent = '重生!';
+      } else {
+        el.btn.className = 'ch-btn counting';
+        const rem = Math.ceil((target - now) / 1000);
+        el.timeSpan.textContent = formatClock(rem);
+      }
+    }
+
+    function refreshAllUI() {
+      const now = Date.now();
+      for (let ch = 1; ch <= TOTAL_CHANNELS; ch++) {
+        const el = channelElements[ch];
+        const target = targets[ch];
+
+        if (target === 0) {
+          if (!el.btn.classList.contains('ready') || el.btn.classList.contains('counting') || el.btn.classList.contains('spawned')) {
+            el.btn.className = 'ch-btn ready';
+            el.timeSpan.textContent = 'Ready';
+          }
+        } else if (now >= target) {
+          if (!el.btn.classList.contains('spawned')) {
+            el.btn.className = 'ch-btn spawned';
+            el.timeSpan.textContent = '重生!';
+          }
+        } else {
+          if (!el.btn.classList.contains('counting')) {
+            el.btn.className = 'ch-btn counting';
+          }
+          const rem = Math.ceil((target - now) / 1000);
+          el.timeSpan.textContent = formatClock(rem);
+        }
+      }
+    }
+
+    setInterval(refreshAllUI, 1000);
+    refreshAllUI();
+
+    function connectMqtt(room) {
+      if (mqttClient) {
+        try { mqttClient.end(true); } catch (e) {}
+        mqttClient = null;
+      }
+
+      if (!room) {
+        updateBadgeUI();
+        return;
+      }
+
+      setConnectionStatus('connecting');
+
+      const options = {
+        clean: true,
+        connectTimeout: 5000,
+        clientId: clientId
+      };
+
+      try {
+        mqttClient = mqtt.connect(MQTT_BROKER_URL, options);
+
+        mqttClient.on('connect', () => {
+          setConnectionStatus('connected');
+          const topic = MQTT_TOPIC_PREFIX + room;
+          mqttClient.subscribe(topic, { qos: 0 }, (err) => {
+            if (!err) {
+              // 剛連線時，請求房間內其他在線隊友提供最新同步狀態
+              broadcastMqtt({ type: 'sync_request', from: clientId });
+            }
+          });
+        });
+
+        mqttClient.on('message', (topic, payload) => {
+          try {
+            const data = JSON.parse(payload.toString());
+            handleIncomingMessage(data);
+          } catch (e) {
+            console.error('MQTT JSON 解析錯誤', e);
+          }
+        });
+
+        mqttClient.on('error', () => {
+          setConnectionStatus('error');
+        });
+
+        mqttClient.on('offline', () => {
+          setConnectionStatus('offline');
+        });
+
+        mqttClient.on('reconnect', () => {
+          setConnectionStatus('connecting');
+        });
+      } catch (err) {
+        console.warn('MQTT 連線失敗:', err);
+        setConnectionStatus('offline');
+      }
+
+      updateBadgeUI();
+    }
+
+    function setConnectionStatus(status) {
+      if (status === 'connected') {
+        mqttStatusDot.className = 'inline-block w-2 h-2 rounded-full bg-emerald-400 animate-pulse';
+        currentRoomText.textContent = `房間：${currentRoom} (已即時連線)`;
+        roomStatusIcon.textContent = '🟢';
+        roomBadgeText.textContent = `${currentRoom}`;
+      } else if (status === 'connecting') {
+        mqttStatusDot.className = 'inline-block w-2 h-2 rounded-full bg-amber-400 animate-ping';
+        currentRoomText.textContent = `房間：${currentRoom} (連線中...)`;
+        roomStatusIcon.textContent = '🟡';
+        roomBadgeText.textContent = `${currentRoom}`;
+      } else {
+        mqttStatusDot.className = 'inline-block w-2 h-2 rounded-full bg-rose-500';
+        currentRoomText.textContent = currentRoom ? `房間：${currentRoom} (斷線重試中)` : '狀態：單機模式';
+        roomStatusIcon.textContent = currentRoom ? '🔴' : '🔗';
+        roomBadgeText.textContent = currentRoom ? `${currentRoom}` : '單機';
+      }
+    }
+
+    function broadcastMqtt(msgObj) {
+      if (!mqttClient || !currentRoom) return;
+      const topic = MQTT_TOPIC_PREFIX + currentRoom;
+      try {
+        mqttClient.publish(topic, JSON.stringify(msgObj));
+      } catch (e) {
+        console.warn('發布訊息失敗', e);
+      }
+    }
+
+    // 處理隊友傳送過來的資料
+    function handleIncomingMessage(data) {
+      if (!data || data.from === clientId) return;
+
+      if (data.type === 'channel_update') {
+        if (typeof data.ch === 'number' && data.ch >= 1 && data.ch <= TOTAL_CHANNELS) {
+          targets[data.ch] = data.target || 0;
+          saveLocalTargets();
+          updateChannelUI(data.ch);
+        }
+      } else if (data.type === 'reset_all') {
+        targets = Array(TOTAL_CHANNELS + 1).fill(0);
+        saveLocalTargets();
+        refreshAllUI();
+      } else if (data.type === 'sync_request') {
+        // 新隊友加入，將自己目前的整份計時資料發給他
+        broadcastMqtt({
+          type: 'sync_response',
+          targets: targets,
+          m: parseInt(minInput.value) || 0,
+          s: parseInt(secInput.value) || 0,
+          from: clientId
+        });
+      } else if (data.type === 'sync_response') {
+        if (Array.isArray(data.targets)) {
+          // 合併狀態，以較新的為準
+          targets = data.targets;
+          saveLocalTargets();
+          refreshAllUI();
+        }
+        if (typeof data.m === 'number' && typeof data.s === 'number') {
+          minInput.value = data.m;
+          secInput.value = data.s;
+        }
+      } else if (data.type === 'settings') {
+        if (typeof data.m === 'number') minInput.value = data.m;
+        if (typeof data.s === 'number') secInput.value = data.s;
+      }
+    }
+
+    function updateBadgeUI() {
+      if (!currentRoom) {
+        roomBadgeText.textContent = '單機';
+        roomStatusIcon.textContent = '🔗';
+        currentRoomText.textContent = '狀態：單機模式 (本機儲存)';
+        mqttStatusDot.className = 'inline-block w-2 h-2 rounded-full bg-gray-500';
+      }
+    }
+
+    window.openRoomModal = function() {
+      roomCodeInput.value = currentRoom || '';
+      roomModal.classList.add('show');
+    };
+
+    window.closeRoomModal = function() {
+      roomModal.classList.remove('show');
+    };
+
+    window.generateRandomRoom = function() {
+      const code = Math.floor(100000 + Math.random() * 900000).toString();
+      roomCodeInput.value = code;
+    };
+
+    window.joinRoomAction = function() {
+      const code = roomCodeInput.value.trim().toUpperCase();
+      if (!code || code.length !== 6) {
+        showPrompt({
+          title: '密碼格式錯誤',
+          message: '請輸入精確的 6 位數房間密碼（例如：884920）。',
+          showCancel: false
+        });
+        return;
+      }
+
+      currentRoom = code;
+      localStorage.setItem(ROOM_KEY, currentRoom);
+      window.location.hash = `room=${currentRoom}`;
+      connectMqtt(currentRoom);
+      closeRoomModal();
+
+      showPrompt({
+        title: '已進入同步房間',
+        message: `成功連線至房間 [${currentRoom}]！\n現在與隊友使用同一個 6 位數代碼，即可跨手機即時同步！`,
+        showCancel: false
+      });
+    };
+
+    window.leaveRoomAction = function() {
+      if (mqttClient) {
+        try { mqttClient.end(true); } catch (e) {}
+        mqttClient = null;
+      }
+      currentRoom = '';
+      localStorage.removeItem(ROOM_KEY);
+      window.location.hash = '';
+      updateBadgeUI();
+      closeRoomModal();
+
+      showPrompt({
+        title: '已切換為單機模式',
+        message: '已中斷雲端同步，目前倒數僅保存在此裝置。',
+        showCancel: false
+      });
+    };
+
+    window.copyInviteLink = function() {
+      let code = roomCodeInput.value.trim().toUpperCase() || currentRoom;
+      if (!code || code.length !== 6) {
+        code = Math.floor(100000 + Math.random() * 900000).toString();
+        roomCodeInput.value = code;
+      }
+
+      const url = new URL(window.location.href);
+      url.hash = `room=${code}`;
+      const copyText = url.toString();
+
+      const input = document.createElement("input");
+      input.value = copyText;
+      document.body.appendChild(input);
+      input.select();
+      try {
+        document.execCommand('copy');
+        const btn = document.getElementById('copyLinkBtn');
+        const oldText = btn.innerHTML;
+        btn.innerHTML = '✅ 已複製連結！';
+        setTimeout(() => { btn.innerHTML = oldText; }, 2000);
+      } catch (e) {}
+      document.body.removeChild(input);
+    };
+
+    // 檢查網址列是否包含 #room=XXXXXX
+    function checkUrlHash() {
+      const hash = window.location.hash;
+      const match = hash.match(/room=([A-Za-z0-9]{6})/);
+      if (match && match[1]) {
+        currentRoom = match[1].toUpperCase();
+        localStorage.setItem(ROOM_KEY, currentRoom);
+      }
+      if (currentRoom) {
+        connectMqtt(currentRoom);
+      } else {
+        updateBadgeUI();
+      }
+    }
+    checkUrlHash();
+
+    const dialogBox = document.getElementById('generalDialog');
+    const dialogTitle = document.getElementById('dialogTitle');
+    const dialogMsg = document.getElementById('dialogMessage');
+    const dialogCancelBtn = document.getElementById('dialogCancelBtn');
+    const dialogConfirmBtn = document.getElementById('dialogConfirmBtn');
+
+    function showPrompt({ title, message, showCancel = true, onConfirm }) {
+      dialogTitle.textContent = title;
+      dialogMsg.textContent = message;
+      dialogCancelBtn.style.display = showCancel ? 'block' : 'none';
+      dialogBox.classList.add('show');
+
+      const cleanup = () => {
+        dialogBox.classList.remove('show');
+        dialogConfirmBtn.onclick = null;
+        dialogCancelBtn.onclick = null;
+      };
+
+      dialogConfirmBtn.onclick = () => {
+        cleanup();
+        if (onConfirm) onConfirm();
+      };
+      dialogCancelBtn.onclick = cleanup;
+    }
+
+    window.confirmResetAll = function() {
+      showPrompt({
+        title: '⚠️ 重置所有頻道',
+        message: currentRoom 
+          ? `確定要重置房間 [${currentRoom}] 的 60 個頻道嗎？隊友的畫面將同步被重置清空！`
+          : '即將清除所有 60 個頻道的倒數，確定重置嗎？',
+        showCancel: true,
+        onConfirm: () => {
+          targets = Array(TOTAL_CHANNELS + 1).fill(0);
+          saveLocalTargets();
+          refreshAllUI();
+          if (currentRoom) {
+            broadcastMqtt({ type: 'reset_all', from: clientId });
+          }
+        }
+      });
+    };
+
+    window.toggleHelp = function() {
+      showPrompt({
+        title: '💡 使用與多人同步說明',
+        message: '1. 【左上角 🔗 按鈕】：設定 6 位數房間密碼，任何人輸入同密碼即可跨手機秒級同步！\n2. 【一鍵邀請】：在房間設定點選「複製邀請連結」傳至 LINE/Discord，隊友點開直接同步進房。\n3. 【點擊頻道】：就緒時點擊開始倒數；倒數中點擊重新計時；重生時點擊確認擊殺回到就緒。\n4. 【長按 0.7 秒】：直接將該頻道清空重置。\n5. 【自動存檔】：螢幕休眠、切換分頁時間不中斷。',
+        showCancel: false
+      });
+    };
+  </script>
+</body>
+</html>
